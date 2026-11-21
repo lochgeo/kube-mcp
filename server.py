@@ -6,8 +6,8 @@ from typing import Dict, List, Optional
 from datetime import datetime
 from kubernetes import client, config
 from kubernetes.client import V1Pod, V1Container, V1PodSpec, V1ObjectMeta
-from mcp.shared.exceptions import McpError
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ResourceError, ToolError
 from pydantic import BaseModel
 
 
@@ -138,8 +138,8 @@ container_templates: Dict[str, V1Container] = {
 
 k8s_manager = KubernetesManager()
 
-# FastMCP Server Setup
-mcp = FastMCP(name="kube-mcp")
+# MCP Server Setup
+mcp = MCPServer(name="kube-mcp")
 
 
 # Define Tool Input Schemas with Pydantic
@@ -186,14 +186,7 @@ async def list_pods(input_data: ListPodsInput):
     pods = await asyncio.to_thread(
         k8s_manager.get_core_api().list_namespaced_pod, input_data.namespace
     )
-    return [
-        {
-            "type": "text",
-            "text": json.dumps(
-                {"pods": [pod.to_dict() for pod in pods.items]}, indent=2
-            ),
-        }
-    ]
+    return json.dumps({"pods": [pod.to_dict() for pod in pods.items]}, indent=2)
 
 
 @mcp.tool()
@@ -201,14 +194,9 @@ async def list_deployments(input_data: ListDeploymentsInput):
     deployments = await asyncio.to_thread(
         k8s_manager.get_apps_api().list_namespaced_deployment, input_data.namespace
     )
-    return [
-        {
-            "type": "text",
-            "text": json.dumps(
-                {"deployments": [d.to_dict() for d in deployments.items]}, indent=2
-            ),
-        }
-    ]
+    return json.dumps(
+        {"deployments": [d.to_dict() for d in deployments.items]}, indent=2
+    )
 
 
 @mcp.tool()
@@ -216,33 +204,19 @@ async def list_services(input_data: ListServicesInput):
     services = await asyncio.to_thread(
         k8s_manager.get_core_api().list_namespaced_service, input_data.namespace
     )
-    return [
-        {
-            "type": "text",
-            "text": json.dumps(
-                {"services": [s.to_dict() for s in services.items]}, indent=2
-            ),
-        }
-    ]
+    return json.dumps({"services": [s.to_dict() for s in services.items]}, indent=2)
 
 
 @mcp.tool()
 async def list_namespaces():
     namespaces = await asyncio.to_thread(k8s_manager.get_core_api().list_namespace)
-    return [
-        {
-            "type": "text",
-            "text": json.dumps(
-                {"namespaces": [n.to_dict() for n in namespaces.items]}, indent=2
-            ),
-        }
-    ]
+    return json.dumps({"namespaces": [n.to_dict() for n in namespaces.items]}, indent=2)
 
 
 @mcp.tool()
 async def create_pod(input_data: CreatePodInput):
     if input_data.template not in container_templates:
-        raise McpError(f"Invalid template: {input_data.template}")
+        raise ToolError(f"Invalid template: {input_data.template}")
     container = container_templates[input_data.template]
     if input_data.command:
         container.command = input_data.command
@@ -262,16 +236,11 @@ async def create_pod(input_data: CreatePodInput):
             k8s_manager.get_core_api().create_namespaced_pod, input_data.namespace, pod
         )
         k8s_manager.track_resource("Pod", input_data.name, input_data.namespace)
-        return [
-            {
-                "type": "text",
-                "text": json.dumps(
-                    {"podName": response.metadata.name, "status": "created"}, indent=2
-                ),
-            }
-        ]
+        return json.dumps(
+            {"podName": response.metadata.name, "status": "created"}, indent=2
+        )
     except client.exceptions.ApiException as e:
-        raise McpError(f"Failed to create pod: {e}")
+        raise ToolError(f"Failed to create pod: {e}")
 
 
 @mcp.tool()
@@ -282,23 +251,11 @@ async def delete_pod(input_data: DeletePodInput):
             input_data.name,
             input_data.namespace,
         )
-        return [
-            {
-                "type": "text",
-                "text": json.dumps({"success": True, "status": "deleted"}, indent=2),
-            }
-        ]
+        return json.dumps({"success": True, "status": "deleted"}, indent=2)
     except client.exceptions.ApiException as e:
         if input_data.ignoreNotFound and e.status == 404:
-            return [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {"success": True, "status": "not_found"}, indent=2
-                    ),
-                }
-            ]
-        raise McpError(f"Failed to delete pod: {e}")
+            return json.dumps({"success": True, "status": "not_found"}, indent=2)
+        raise ToolError(f"Failed to delete pod: {e}")
 
 
 @mcp.tool()
@@ -309,34 +266,29 @@ async def describe_pod(input_data: DescribePodInput):
             input_data.name,
             input_data.namespace,
         )
-        return [{"type": "text", "text": json.dumps(pod.to_dict(), indent=2)}]
+        return json.dumps(pod.to_dict(), indent=2)
     except client.exceptions.ApiException as e:
         if e.status == 404:
-            raise McpError("Pod not found")
-        raise McpError(f"Failed to describe pod: {e}")
+            raise ToolError("Pod not found")
+        raise ToolError(f"Failed to describe pod: {e}")
 
 
 @mcp.tool()
 async def cleanup():
     await k8s_manager.cleanup()
-    return [{"type": "text", "text": json.dumps({"success": True}, indent=2)}]
+    return json.dumps({"success": True}, indent=2)
 
 
 @mcp.tool()
 async def list_nodes():
     nodes = await asyncio.to_thread(k8s_manager.get_core_api().list_node)
-    return [
-        {
-            "type": "text",
-            "text": json.dumps({"nodes": [n.to_dict() for n in nodes.items]}, indent=2),
-        }
-    ]
+    return json.dumps({"nodes": [n.to_dict() for n in nodes.items]}, indent=2)
 
 
 @mcp.tool()
 async def get_logs(input_data: GetLogsInput):
     if input_data.resourceType != "pod" or not input_data.name:
-        raise McpError("Only pod logs supported with a name")
+        raise ToolError("Only pod logs supported with a name")
     try:
         logs = await asyncio.to_thread(
             k8s_manager.get_core_api().read_namespaced_pod_log,
@@ -344,14 +296,9 @@ async def get_logs(input_data: GetLogsInput):
             input_data.namespace,
             tail_lines=input_data.tail,
         )
-        return [
-            {
-                "type": "text",
-                "text": json.dumps({"logs": {input_data.name: logs}}, indent=2),
-            }
-        ]
+        return json.dumps({"logs": {input_data.name: logs}}, indent=2)
     except client.exceptions.ApiException as e:
-        raise McpError(f"Failed to get logs: {e}")
+        raise ToolError(f"Failed to get logs: {e}")
 
 
 @mcp.resource("k8s://namespaces")
@@ -359,14 +306,6 @@ async def read_namespaces():
     try:
         api_call = k8s_manager.get_core_api().list_namespace
         result = await asyncio.to_thread(api_call)
-        return [
-            {
-                "uri": uri,
-                "mimeType": "application/json",
-                "text": json.dumps([item.to_dict() for item in result.items], indent=2),
-            }
-        ]
-    except McpError as e:
-        raise e
+        return json.dumps([item.to_dict() for item in result.items], indent=2)
     except Exception as e:
-        raise McpError(f"Failed to read resource: {e}")
+        raise ResourceError(f"Failed to read resource: {e}")
